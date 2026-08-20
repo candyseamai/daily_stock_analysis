@@ -99,7 +99,10 @@ _AUTO_THINKING_MODELS: List[str] = ["deepseek-reasoner", "deepseek-r1", "qwq"]
 
 # Models that need explicit opt-in via extra_body; payload decoupled from model name.
 _OPT_IN_THINKING_MODELS: Dict[str, dict] = {
+_OPT_IN_THINKING_MODELS: Dict[str, dict] = {
     "deepseek-chat": {"thinking": {"type": "enabled"}},
+    "deepseek-v4-flash": {"thinking": {"type": "disabled"}},
+    "deepseek-v4-pro": {"thinking": {"type": "disabled"}},
 }
 
 # Custom model pricing for models not in LiteLLM's built-in price list.
