@@ -77,7 +77,7 @@ def test_reverse_input_and_duplicate_session_keep_last_with_warning():
 
 def test_input_dataframe_is_not_modified():
     frame = _bars(20)
-    frame.loc[0, "close"] = "100"
+    frame["close"] = frame["close"].astype(str)
     original = frame.copy(deep=True)
     _calculate(frame)
     assert_frame_equal(frame, original)
@@ -261,10 +261,10 @@ def test_range_mappings_are_read_only():
         result.range_lows[5] = 1.0
 
 
-def test_confirmed_two_left_two_right_swings_and_last_two_excluded():
+def test_returns_latest_confirmed_two_left_two_right_swing_low():
     frame = _bars(10)
     frame["high"] = [11, 12, 20, 13, 12, 14, 15, 16, 30, 40]
-    frame["low"] = [9, 8, 7, 8, 9, 8, 2, 8, 1, 0.5]
+    frame["low"] = [9, 8, 7, 8, 9, 8, 2, 8, 3, 4]
     frame["open"] = 10.0
     frame["close"] = 10.0
     result = _calculate(frame)
@@ -273,7 +273,22 @@ def test_confirmed_two_left_two_right_swings_and_last_two_excluded():
     assert result.recent_swing_low is not None
     assert result.recent_swing_low.date == frame.iloc[6]["date"]
     assert result.recent_swing_high.value != 40
-    assert result.recent_swing_low.value != 0.5
+    assert result.recent_swing_low.value == 2
+
+
+def test_lower_right_confirmation_bar_invalidates_earlier_swing_low_candidate():
+    frame = _bars(10)
+    frame["high"] = [11, 12, 20, 13, 12, 14, 15, 16, 30, 40]
+    frame["low"] = [9, 8, 7, 8, 9, 8, 2, 8, 1, 0.5]
+    frame["open"] = 10.0
+    frame["close"] = 10.0
+    result = _calculate(frame)
+
+    assert result.recent_swing_low is not None
+    assert result.recent_swing_low.date == frame.iloc[2]["date"]
+    assert result.recent_swing_low.value == 7
+    assert result.recent_swing_low.date != frame.iloc[6]["date"]
+    assert result.recent_swing_low.value not in {1, 0.5}
 
 
 def test_equal_highs_and_equal_lows_do_not_create_confirmed_swings():
@@ -384,10 +399,23 @@ def test_multiple_unfilled_gaps_coexist_independently():
 
 def test_support_resistance_never_reverse_and_equal_is_neutral():
     frame = _bars(60)
+    frame["open"] = 100.0
+    frame["high"] = 101.0
+    frame["low"] = 99.0
+    frame["close"] = 100.0
     result = _calculate(frame)
+
     assert all(zone.upper < result.close for zone in result.support_zones)
     assert all(zone.lower > result.close for zone in result.resistance_zones)
-    assert any(item.value == result.close for item in result.neutral_evidences)
+    neutral_kinds = {item.kind for item in result.neutral_evidences}
+    assert {"ma5", "ma10", "ma20", "ma60", "boll20_middle"}.issubset(neutral_kinds)
+    assert all(item.value == result.close for item in result.neutral_evidences)
+    directional_evidences = {
+        item
+        for zone in (*result.support_zones, *result.resistance_zones)
+        for item in zone.evidences
+    }
+    assert all(item not in directional_evidences for item in result.neutral_evidences)
 
 
 def test_gap_interval_crossing_close_is_neutral_as_a_whole():
