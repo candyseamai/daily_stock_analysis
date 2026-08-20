@@ -248,6 +248,27 @@ def get_effective_trading_date(
         return fallback_date
 
 
+def get_previous_trading_date(market: Optional[str], trading_date: date) -> Optional[date]:
+    """Return the trading session immediately before ``trading_date``.
+
+    ``trading_date`` must itself be a confirmed session for ``market``. The
+    function fails closed and returns ``None`` when the calendar is unavailable,
+    the market is unsupported, the date is not a session, or lookup fails.
+    """
+    if market not in MARKET_EXCHANGE or not _XCALS_AVAILABLE:
+        return None
+
+    try:
+        cal = xcals.get_calendar(MARKET_EXCHANGE[market])
+        if not cal.is_session(trading_date):
+            return None
+        session = cal.date_to_session(trading_date, direction="previous")
+        return cal.previous_session(session).date()
+    except Exception as e:
+        logger.warning("trading_calendar.get_previous_trading_date fail-closed: %s", e)
+        return None
+
+
 def resolve_historical_daily_bar_date(
     market: Optional[str],
     target_date: date,
