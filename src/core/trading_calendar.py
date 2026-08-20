@@ -168,8 +168,7 @@ def is_market_open(market: str, check_date: date) -> bool:
         return True
     try:
         cal = xcals.get_calendar(ex)
-        session = datetime(check_date.year, check_date.month, check_date.day)
-        return cal.is_session(session)
+        return bool(cal.is_session(check_date))
     except Exception as e:
         logger.warning("trading_calendar.is_market_open fail-open: %s", e)
         return True

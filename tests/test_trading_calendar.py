@@ -145,6 +145,53 @@ class _CloseTimeCalendar(_FakeCalendar):
         return pd.Timestamp(local_close).tz_convert("UTC")
 
 
+class IsMarketOpenTestCase(unittest.TestCase):
+    def _is_market_open_with_calendar(self, check_date: date, calendar) -> bool:
+        with patch.object(trading_calendar, "_XCALS_AVAILABLE", True), patch.object(
+            trading_calendar,
+            "xcals",
+            _calendar_namespace(calendar),
+            create=True,
+        ):
+            return trading_calendar.is_market_open("cn", check_date)
+
+    def test_passes_python_date_to_calendar(self):
+        received = []
+        calendar = SimpleNamespace(
+            is_session=lambda value: received.append(value) or True,
+        )
+
+        result = self._is_market_open_with_calendar(date(2026, 3, 24), calendar)
+
+        self.assertTrue(result)
+        self.assertEqual(received, [date(2026, 3, 24)])
+        self.assertIs(type(received[0]), date)
+
+    def test_session_date_returns_true(self):
+        calendar = SimpleNamespace(is_session=lambda _value: True)
+
+        self.assertTrue(
+            self._is_market_open_with_calendar(date(2026, 3, 24), calendar)
+        )
+
+    def test_non_session_date_returns_false(self):
+        calendar = SimpleNamespace(is_session=lambda _value: False)
+
+        self.assertFalse(
+            self._is_market_open_with_calendar(date(2026, 3, 28), calendar)
+        )
+
+    def test_calendar_error_remains_fail_open(self):
+        def raise_calendar_error(_value):
+            raise RuntimeError("calendar lookup failed")
+
+        calendar = SimpleNamespace(is_session=raise_calendar_error)
+
+        self.assertTrue(
+            self._is_market_open_with_calendar(date(2026, 3, 24), calendar)
+        )
+
+
 class HistoricalDailyBarDateTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.calendar = _FakeCalendar(
