@@ -33,8 +33,16 @@ class DataQualityStatus(str, Enum):
 
 @dataclass(frozen=True)
 class LevelEvidence:
+    """Audit metadata for one level at a calculation cutoff.
+
+    ``calculated_on`` is the latest complete session used by the calculation.
+    ``source_date`` is populated only when the price maps to a specific history
+    bar; derived indicators deliberately leave it as ``None``.
+    """
+
     kind: str
     value: float
+    calculated_on: date
     source_date: Optional[date]
     period: Optional[int]
     description: str
@@ -141,12 +149,21 @@ def calculate_index_technical_levels(
 
     range_highs = {period: _window_extreme(frame, period, "high", "max") for period in LOOKBACK_PERIODS}
     range_lows = {period: _window_extreme(frame, period, "low", "min") for period in LOOKBACK_PERIODS}
+    range_high_dates = {
+        period: _window_extreme_source_date(frame, period, "high", "max")
+        for period in LOOKBACK_PERIODS
+    }
+    range_low_dates = {
+        period: _window_extreme_source_date(frame, period, "low", "min")
+        for period in LOOKBACK_PERIODS
+    }
     swing_high, swing_low = _latest_confirmed_swings(frame)
     gaps = _unfilled_gaps(frame)
 
     evidences = _build_evidences(
         frame, mas, boll_upper, boll_middle, boll_lower, atr14,
-        range_highs, range_lows, swing_high, swing_low, gaps,
+        range_highs, range_lows, range_high_dates, range_low_dates,
+        swing_high, swing_low, gaps,
     )
     support, resistance, neutral = _classify_evidences(evidences, float(latest["close"]))
     support_zones = _cluster_levels(support, float(latest["close"]), atr14, "support")
@@ -362,6 +379,21 @@ def _window_extreme(frame: pd.DataFrame, period: int, column: str, operation: st
     return _finite_or_none(window.max() if operation == "max" else window.min())
 
 
+def _window_extreme_source_date(
+    frame: pd.DataFrame,
+    period: int,
+    column: str,
+    operation: str,
+) -> Optional[date]:
+    """Return the most recent bar date carrying a complete-window extreme."""
+    if len(frame) < period:
+        return None
+    window = frame.tail(period)
+    extreme = window[column].max() if operation == "max" else window[column].min()
+    matches = window.loc[window[column] == extreme, "session"]
+    return None if matches.empty else matches.iloc[-1]
+
+
 def _latest_confirmed_swings(frame: pd.DataFrame) -> tuple[Optional[SwingPoint], Optional[SwingPoint]]:
     highs: list[SwingPoint] = []
     lows: list[SwingPoint] = []
@@ -401,10 +433,17 @@ def _unfilled_gaps(frame: pd.DataFrame) -> tuple[DailyGap, ...]:
     return tuple(gaps)
 
 
-def _evidence(kind: str, value: float, source_date: Optional[date], period: Optional[int], description: str) -> LevelEvidence:
+def _evidence(
+    kind: str,
+    value: float,
+    calculated_on: date,
+    source_date: Optional[date],
+    period: Optional[int],
+    description: str,
+) -> LevelEvidence:
     if not _is_finite_number(value):
         raise ValueError(f"non-finite technical-level evidence: {kind}")
-    return LevelEvidence(kind, float(value), source_date, period, description)
+    return LevelEvidence(kind, float(value), calculated_on, source_date, period, description)
 
 
 def _build_evidences(
@@ -412,44 +451,51 @@ def _build_evidences(
     mas: dict[int, Optional[float]],
     boll_upper: Optional[float], boll_middle: Optional[float], boll_lower: Optional[float],
     atr14: Optional[float], range_highs: dict[int, Optional[float]], range_lows: dict[int, Optional[float]],
+    range_high_dates: dict[int, Optional[date]], range_low_dates: dict[int, Optional[date]],
     swing_high: Optional[SwingPoint], swing_low: Optional[SwingPoint], gaps: Sequence[DailyGap],
 ) -> list[LevelEvidence]:
     latest = frame.iloc[-1]
     session = latest["session"]
     values = [
-        _evidence("previous_high", latest["high"], session, 1, "上一完整交易日最高价"),
-        _evidence("previous_low", latest["low"], session, 1, "上一完整交易日最低价"),
+        _evidence("previous_high", latest["high"], session, session, 1, "上一完整交易日最高价"),
+        _evidence("previous_low", latest["low"], session, session, 1, "上一完整交易日最低价"),
     ]
     for period, value in mas.items():
         if value is not None:
-            values.append(_evidence(f"ma{period}", value, session, period, f"{period}日收盘简单移动平均"))
+            values.append(_evidence(f"ma{period}", value, session, None, period, f"{period}日收盘简单移动平均"))
     for kind, value, description in (
         ("boll20_upper", boll_upper, "BOLL20上轨（总体标准差×2）"),
         ("boll20_middle", boll_middle, "BOLL20中轨（20日收盘均值）"),
         ("boll20_lower", boll_lower, "BOLL20下轨（总体标准差×2）"),
     ):
         if value is not None:
-            values.append(_evidence(kind, value, session, 20, description))
+            values.append(_evidence(kind, value, session, None, 20, description))
     for period in LOOKBACK_PERIODS:
         if range_highs[period] is not None:
-            values.append(_evidence(f"high_{period}d", range_highs[period], session, period, f"近{period}日最高价"))
+            values.append(_evidence(
+                f"high_{period}d", range_highs[period], session, range_high_dates[period],
+                period, f"近{period}日最高价",
+            ))
         if range_lows[period] is not None:
-            values.append(_evidence(f"low_{period}d", range_lows[period], session, period, f"近{period}日最低价"))
+            values.append(_evidence(
+                f"low_{period}d", range_lows[period], session, range_low_dates[period],
+                period, f"近{period}日最低价",
+            ))
     if swing_high:
-        values.append(_evidence("confirmed_swing_high", swing_high.value, swing_high.date, 5, "2左2右确认局部高点"))
+        values.append(_evidence("confirmed_swing_high", swing_high.value, session, swing_high.date, 5, "2左2右确认局部高点"))
     if swing_low:
-        values.append(_evidence("confirmed_swing_low", swing_low.value, swing_low.date, 5, "2左2右确认局部低点"))
+        values.append(_evidence("confirmed_swing_low", swing_low.value, session, swing_low.date, 5, "2左2右确认局部低点"))
     for gap in gaps:
-        values.append(_evidence(f"{gap.direction}_gap_remaining_lower", gap.remaining_lower, gap.formed_on, None, "未完全回补日线缺口剩余下边界"))
-        values.append(_evidence(f"{gap.direction}_gap_remaining_upper", gap.remaining_upper, gap.formed_on, None, "未完全回补日线缺口剩余上边界"))
+        values.append(_evidence(f"{gap.direction}_gap_remaining_lower", gap.remaining_lower, session, gap.formed_on, None, "未完全回补日线缺口剩余下边界"))
+        values.append(_evidence(f"{gap.direction}_gap_remaining_upper", gap.remaining_upper, session, gap.formed_on, None, "未完全回补日线缺口剩余上边界"))
     if atr14 is not None:
         close = float(latest["close"])
         projected_down = _finite_or_none(close - atr14)
         projected_up = _finite_or_none(close + atr14)
         if projected_down is not None:
-            values.append(_evidence("atr14_sma_projection_down", projected_down, session, 14, "收盘减ATR14_SMA波动率投影"))
+            values.append(_evidence("atr14_sma_projection_down", projected_down, session, None, 14, "收盘减ATR14_SMA波动率投影"))
         if projected_up is not None:
-            values.append(_evidence("atr14_sma_projection_up", projected_up, session, 14, "收盘加ATR14_SMA波动率投影"))
+            values.append(_evidence("atr14_sma_projection_up", projected_up, session, None, 14, "收盘加ATR14_SMA波动率投影"))
     return values
 
 

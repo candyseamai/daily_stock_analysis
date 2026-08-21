@@ -39,6 +39,18 @@ def _calculate(frame: pd.DataFrame, expected: date | None = None):
     return calculate_index_technical_levels("sh000001", "上证指数", frame, expected)
 
 
+def _output_evidences(result):
+    return tuple(
+        item
+        for zone in (*result.support_zones, *result.resistance_zones)
+        for item in zone.evidences
+    ) + result.neutral_evidences
+
+
+def _output_evidence(result, kind: str) -> LevelEvidence:
+    return next(item for item in _output_evidences(result) if item.kind == kind)
+
+
 def test_exact_ma_boll_and_atr_values():
     frame = _bars(60)
     result = _calculate(frame)
@@ -54,6 +66,34 @@ def test_exact_ma_boll_and_atr_values():
     assert result.atr14_sma == pytest.approx(2.0)
     assert result.range_highs == {5: 160.0, 10: 160.0, 20: 160.0, 60: 160.0}
     assert result.range_lows == {5: 154.0, 10: 149.0, 20: 139.0, 60: 99.0}
+
+
+def test_evidence_distinguishes_calculation_date_from_historical_source_date():
+    frame = _bars(60)
+    frame["open"] = 100.0
+    frame["high"] = 101.0
+    frame["low"] = 99.0
+    frame["close"] = 100.0
+    frame.loc[[56, 58], "high"] = 105.0
+    frame.loc[[56, 58], "low"] = 95.0
+    result = _calculate(frame)
+
+    calculated_on = frame.iloc[-1]["date"]
+    most_recent_extreme_date = frame.iloc[58]["date"]
+    for period in (5, 10, 20, 60):
+        assert _output_evidence(result, f"high_{period}d").source_date == most_recent_extreme_date
+        assert _output_evidence(result, f"low_{period}d").source_date == most_recent_extreme_date
+
+    for kind in (
+        "ma5", "ma10", "ma20", "ma60",
+        "boll20_upper", "boll20_middle", "boll20_lower",
+        "atr14_sma_projection_down", "atr14_sma_projection_up",
+    ):
+        assert _output_evidence(result, kind).source_date is None
+
+    assert _output_evidence(result, "previous_high").source_date == calculated_on
+    assert _output_evidence(result, "previous_low").source_date == calculated_on
+    assert all(item.calculated_on == calculated_on for item in _output_evidences(result))
 
 
 def test_59_bars_do_not_fabricate_ma60():
@@ -274,6 +314,9 @@ def test_returns_latest_confirmed_two_left_two_right_swing_low():
     assert result.recent_swing_low.date == frame.iloc[6]["date"]
     assert result.recent_swing_high.value != 40
     assert result.recent_swing_low.value == 2
+    assert _output_evidence(result, "confirmed_swing_high").source_date == frame.iloc[2]["date"]
+    assert _output_evidence(result, "confirmed_swing_low").source_date == frame.iloc[6]["date"]
+    assert _output_evidence(result, "confirmed_swing_low").calculated_on == frame.iloc[-1]["date"]
 
 
 def test_lower_right_confirmation_bar_invalidates_earlier_swing_low_candidate():
@@ -424,6 +467,10 @@ def test_gap_interval_crossing_close_is_neutral_as_a_whole():
     result = _calculate(frame)
     neutral_gap_kinds = {item.kind for item in result.neutral_evidences if "gap" in item.kind}
     assert neutral_gap_kinds == {"up_gap_remaining_lower", "up_gap_remaining_upper"}
+    for kind in neutral_gap_kinds:
+        evidence = _output_evidence(result, kind)
+        assert evidence.source_date == frame.iloc[1]["date"]
+        assert evidence.calculated_on == frame.iloc[-1]["date"]
     directional_kinds = {
         item.kind
         for zone in (*result.support_zones, *result.resistance_zones)
@@ -433,7 +480,14 @@ def test_gap_interval_crossing_close_is_neutral_as_a_whole():
 
 
 def _level(value: float, number: int) -> LevelEvidence:
-    return LevelEvidence(f"test_{number}", value, EXPECTED, None, "fixed test level")
+    return LevelEvidence(
+        kind=f"test_{number}",
+        value=value,
+        calculated_on=EXPECTED,
+        source_date=None,
+        period=None,
+        description="fixed test level",
+    )
 
 
 def test_cluster_threshold_and_maximum_width_are_deterministic():
