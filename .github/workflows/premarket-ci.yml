@@ -9,6 +9,7 @@ on:
       - src/services/premarket_window_service.py
       - src/services/index_technical_level_service.py
       - src/services/premarket_index_service.py
+      - src/services/premarket_news_window_service.py
       - data_provider/cn_index_daily.py
       - data_provider/base.py
       - data_provider/yfinance_fetcher.py
@@ -20,6 +21,7 @@ on:
       - tests/test_index_daily_manager.py
       - tests/test_index_daily_fetchers.py
       - tests/test_premarket_index_service.py
+      - tests/test_premarket_news_window_service.py
       - .github/workflows/premarket-ci.yml
   workflow_dispatch:
 
@@ -50,4 +52,4 @@ jobs:
 
       - name: Run premarket tests
         run: |
-          python -m pytest -p no:cacheprovider tests/test_premarket_window_service.py tests/test_trading_calendar.py tests/test_index_technical_level_service.py tests/test_cn_index_daily.py tests/test_index_daily_manager.py tests/test_index_daily_fetchers.py tests/test_premarket_index_service.py -q
+          python -m pytest -p no:cacheprovider tests/test_premarket_window_service.py tests/test_trading_calendar.py tests/test_index_technical_level_service.py tests/test_cn_index_daily.py tests/test_index_daily_manager.py tests/test_index_daily_fetchers.py tests/test_premarket_index_service.py tests/test_premarket_news_window_service.py -q
