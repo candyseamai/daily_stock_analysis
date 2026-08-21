@@ -11,6 +11,7 @@ on:
       - data_provider/cn_index_daily.py
       - data_provider/base.py
       - data_provider/yfinance_fetcher.py
+      - data_provider/akshare_fetcher.py
       - tests/test_premarket_window_service.py
       - tests/test_trading_calendar.py
       - tests/test_index_technical_level_service.py

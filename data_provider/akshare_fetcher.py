@@ -30,7 +30,7 @@ import random
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional, Dict, Any, List, Tuple
 
 import pandas as pd
@@ -45,7 +45,8 @@ from tenacity import (
 
 from src.patches.eastmoney_patch import eastmoney_patch
 from src.config import get_config
-from .base import BaseFetcher, DataFetchError, RateLimitError, STANDARD_COLUMNS, is_bse_code, is_st_stock, is_kc_cy_stock, normalize_stock_code
+from .base import BaseFetcher, DataFetchError, IndexDailyProviderError, RateLimitError, STANDARD_COLUMNS, is_bse_code, is_st_stock, is_kc_cy_stock, normalize_stock_code
+from .cn_index_daily import get_cn_index_identity, get_cn_index_provider_symbol
 from .realtime_types import (
     UnifiedRealtimeQuote, ChipDistribution, RealtimeSource,
     get_realtime_circuit_breaker, get_chip_circuit_breaker,
@@ -418,6 +419,61 @@ class AkshareFetcher(BaseFetcher):
         # 东财补丁开启才执行打补丁操作
         if get_config().enable_eastmoney_patch:
             eastmoney_patch()
+
+    def get_index_daily_data(
+        self,
+        index_code: str,
+        expected_session: date,
+        days: int = 120,
+    ) -> pd.DataFrame:
+        """Fetch preliminary A-share index bars from AkShare's Sina endpoint."""
+        if type(expected_session) is not date:
+            raise ValueError("expected_session must be a pure Python date, not datetime")
+        if type(days) is not int or days <= 0:
+            raise ValueError("days must be a positive integer")
+
+        identity = get_cn_index_identity(index_code)
+        symbol = get_cn_index_provider_symbol(
+            identity.code,
+            self.name,
+            identity.name,
+        )
+
+        try:
+            import akshare as ak
+        except (ImportError, ModuleNotFoundError) as exc:
+            raise IndexDailyProviderError("dependency_unavailable") from exc
+
+        try:
+            downloaded = ak.stock_zh_index_daily(symbol=symbol)
+        except Exception as exc:
+            raise IndexDailyProviderError("download_error") from exc
+
+        if not isinstance(downloaded, pd.DataFrame) or downloaded.empty:
+            raise IndexDailyProviderError("empty")
+
+        frame = downloaded.copy(deep=True)
+        if frame.columns.duplicated().any():
+            raise IndexDailyProviderError("duplicate_columns")
+        renamed = {
+            column: str(column).strip().lower()
+            for column in frame.columns
+            if str(column).strip().lower()
+            in {"date", "open", "high", "low", "close", "volume"}
+        }
+        frame = frame.rename(columns=renamed)
+        required = {"date", "open", "high", "low", "close"}
+        if not required.issubset(frame.columns):
+            raise IndexDailyProviderError("invalid_schema")
+        if frame.columns.duplicated().any():
+            raise IndexDailyProviderError("duplicate_columns")
+
+        if "volume" not in frame.columns:
+            frame["volume"] = pd.NA
+        frame["amount"] = pd.NA
+        return frame.loc[
+            :, ["date", "open", "high", "low", "close", "volume", "amount"]
+        ].copy()
     
     def _set_random_user_agent(self) -> None:
         """

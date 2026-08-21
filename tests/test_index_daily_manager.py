@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 """Offline tests for the dedicated A-share index daily manager route."""
 
+import sys
 from datetime import date, datetime
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 import pandas as pd
 import pytest
@@ -13,6 +16,7 @@ from data_provider.base import (
     DataFetcherManager,
     IndexDailyProviderError,
 )
+from data_provider.akshare_fetcher import AkshareFetcher
 from data_provider.cn_index_daily import INDEX_DAILY_STANDARD_COLUMNS
 
 
@@ -54,6 +58,12 @@ class _FakeIndexFetcher:
 
     def get_daily_data(self, *args, **kwargs):
         raise AssertionError("ordinary stock daily route must not be called")
+
+
+class _RecordingAkshareFetcher(AkshareFetcher):
+    def get_index_daily_data(self, index_code, expected_session, days=120):
+        self.calls.append((self.name, index_code, expected_session, days))
+        return super().get_index_daily_data(index_code, expected_session, days)
 
 
 def _manager(*fetchers) -> DataFetcherManager:
@@ -191,6 +201,68 @@ def test_insufficient_bars_fall_back_and_success_returns_latest_requested_count(
     assert len(result) == 60
     assert result.iloc[-1]["date"].date() == EXPECTED
     assert [call[0] for call in calls] == ["YfinanceFetcher", "TushareFetcher"]
+
+
+def test_manager_full_fallback_reaches_akshare_sina_successfully():
+    calls = []
+    yfinance = _FakeIndexFetcher(
+        "YfinanceFetcher", IndexDailyProviderError("download_error"), calls
+    )
+    tushare = _FakeIndexFetcher("TushareFetcher", None, calls)
+    akshare = _RecordingAkshareFetcher.__new__(_RecordingAkshareFetcher)
+    akshare.calls = calls
+    fake_akshare = SimpleNamespace(
+        stock_zh_index_daily=Mock(return_value=_provider_bars())
+    )
+
+    with patch.dict(sys.modules, {"akshare": fake_akshare}):
+        result, provider = _manager(
+            akshare, tushare, yfinance
+        ).get_index_daily_data("sh000001", EXPECTED, days=120)
+
+    assert provider == "AkshareFetcher"
+    assert len(result) == 120
+    assert result.attrs["provider"] == "AkshareFetcher"
+    assert result.attrs["provider_symbol"] == "sh000001"
+    assert [call[0] for call in calls] == [
+        "YfinanceFetcher", "TushareFetcher", "AkshareFetcher"
+    ]
+    fake_akshare.stock_zh_index_daily.assert_called_once_with(symbol="sh000001")
+
+
+@pytest.mark.parametrize(
+    "akshare_frame,expected_category",
+    [
+        (_provider_bars(date(2026, 3, 23)), "stale"),
+        (_provider_bars(count=119), "insufficient_bars"),
+    ],
+)
+def test_manager_rejects_stale_or_insufficient_akshare_result(
+    akshare_frame, expected_category
+):
+    calls = []
+    yfinance = _FakeIndexFetcher(
+        "YfinanceFetcher", IndexDailyProviderError("download_error"), calls
+    )
+    tushare = _FakeIndexFetcher("TushareFetcher", None, calls)
+    akshare = _RecordingAkshareFetcher.__new__(_RecordingAkshareFetcher)
+    akshare.calls = calls
+    fake_akshare = SimpleNamespace(
+        stock_zh_index_daily=Mock(return_value=akshare_frame)
+    )
+
+    with patch.dict(sys.modules, {"akshare": fake_akshare}):
+        with pytest.raises(DataFetchError) as exc_info:
+            _manager(akshare, tushare, yfinance).get_index_daily_data(
+                "sh000001", EXPECTED, days=120
+            )
+
+    message = str(exc_info.value)
+    assert "AkshareFetcher" in message
+    assert expected_category in message
+    assert [call[0] for call in calls] == [
+        "YfinanceFetcher", "TushareFetcher", "AkshareFetcher"
+    ]
 
 
 def test_all_provider_failures_raise_sanitized_provider_summary():

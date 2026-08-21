@@ -9,7 +9,9 @@ from unittest.mock import Mock, patch
 import pandas as pd
 import pytest
 
+import data_provider.akshare_fetcher as akshare_module
 from data_provider.base import IndexDailyProviderError
+from data_provider.akshare_fetcher import AkshareFetcher
 from data_provider.yfinance_fetcher import YfinanceFetcher
 
 
@@ -32,10 +34,22 @@ def _download_frame(*, symbol=None, multi_index=False) -> pd.DataFrame:
     return pd.DataFrame(values, index=index, columns=columns)
 
 
+def _akshare_frame() -> pd.DataFrame:
+    return pd.DataFrame({
+        "date": [date(2026, 3, 23), EXPECTED],
+        "open": [100.0, 101.0],
+        "high": [102.0, 103.0],
+        "low": [99.0, 100.0],
+        "close": [101.0, 102.0],
+        "volume": [1000.0, 1100.0],
+    })
+
+
 def _assert_category(expected_category, callable_):
     with pytest.raises(IndexDailyProviderError) as exc_info:
         callable_()
     assert exc_info.value.category == expected_category
+    assert str(exc_info.value) == expected_category
 
 
 def _run_with_download(index_code, returned_frame, download_mock=None):
@@ -45,6 +59,15 @@ def _run_with_download(index_code, returned_frame, download_mock=None):
         result = YfinanceFetcher().get_index_daily_data(
             index_code, EXPECTED, days=60
         )
+    return result, download
+
+
+def _run_with_akshare(index_code, returned_frame, download_mock=None):
+    download = download_mock or Mock(return_value=returned_frame)
+    fake_akshare = SimpleNamespace(stock_zh_index_daily=download)
+    fetcher = AkshareFetcher.__new__(AkshareFetcher)
+    with patch.dict(sys.modules, {"akshare": fake_akshare}):
+        result = fetcher.get_index_daily_data(index_code, EXPECTED, days=60)
     return result, download
 
 
@@ -260,3 +283,92 @@ def test_existing_stock_daily_entry_remains_operational(monkeypatch):
 
 def test_existing_600519_stock_code_conversion_is_unchanged():
     assert YfinanceFetcher()._convert_stock_code("600519") == "600519.SS"
+
+
+@pytest.mark.parametrize("index_code", ["sh000001", "sh000300", "sz399006"])
+def test_akshare_uses_exact_canonical_sina_symbol(index_code):
+    result, download = _run_with_akshare(index_code, _akshare_frame())
+
+    assert result is not None
+    download.assert_called_once_with(symbol=index_code)
+
+
+@pytest.mark.parametrize("index_code", ["000001", "000300", "399006"])
+def test_akshare_rejects_bare_index_codes_before_import(index_code):
+    fetcher = AkshareFetcher.__new__(AkshareFetcher)
+    with pytest.raises(ValueError, match="unsupported canonical"):
+        fetcher.get_index_daily_data(index_code, EXPECTED)
+
+
+def test_akshare_index_route_never_calls_ordinary_stock_entries(monkeypatch):
+    fetcher = AkshareFetcher.__new__(AkshareFetcher)
+    monkeypatch.setattr(
+        fetcher,
+        "_fetch_raw_data",
+        Mock(side_effect=AssertionError("stock raw route must not be called")),
+    )
+    monkeypatch.setattr(
+        fetcher,
+        "get_daily_data",
+        Mock(side_effect=AssertionError("stock daily route must not be called")),
+    )
+    monkeypatch.setattr(
+        akshare_module,
+        "normalize_stock_code",
+        Mock(side_effect=AssertionError("stock code normalizer must not be called")),
+    )
+    fake_akshare = SimpleNamespace(
+        stock_zh_index_daily=Mock(return_value=_akshare_frame())
+    )
+
+    with patch.dict(sys.modules, {"akshare": fake_akshare}):
+        result = fetcher.get_index_daily_data("sh000001", EXPECTED)
+
+    assert result is not None
+    fetcher._fetch_raw_data.assert_not_called()
+    fetcher.get_daily_data.assert_not_called()
+    akshare_module.normalize_stock_code.assert_not_called()
+
+
+def test_akshare_preliminary_fields_keep_amount_missing_and_pct_chg_absent():
+    result, _ = _run_with_akshare("sh000001", _akshare_frame())
+
+    assert list(result.columns) == [
+        "date", "open", "high", "low", "close", "volume", "amount"
+    ]
+    assert result["amount"].isna().all()
+    assert "pct_chg" not in result.columns
+
+
+@pytest.mark.parametrize(
+    "returned,category",
+    [
+        (None, "empty"),
+        (pd.DataFrame(), "empty"),
+        (pd.DataFrame({"unexpected": [1]}), "invalid_schema"),
+    ],
+)
+def test_akshare_empty_or_invalid_schema_raises_structured_failure(
+    returned, category
+):
+    _assert_category(
+        category,
+        lambda: _run_with_akshare("sh000001", returned),
+    )
+
+
+def test_akshare_dependency_unavailable_is_structured():
+    fetcher = AkshareFetcher.__new__(AkshareFetcher)
+    with patch.dict(sys.modules, {"akshare": None}):
+        _assert_category(
+            "dependency_unavailable",
+            lambda: fetcher.get_index_daily_data("sh000001", EXPECTED),
+        )
+
+
+def test_akshare_download_exception_is_structured_and_sanitized():
+    download = Mock(side_effect=RuntimeError("token=VERY_SECRET_VALUE"))
+    _assert_category(
+        "download_error",
+        lambda: _run_with_akshare("sh000001", None, download),
+    )
