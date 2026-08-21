@@ -8,9 +8,11 @@ on:
       - src/core/trading_calendar.py
       - src/services/premarket_window_service.py
       - src/services/index_technical_level_service.py
+      - data_provider/cn_index_daily.py
       - tests/test_premarket_window_service.py
       - tests/test_trading_calendar.py
       - tests/test_index_technical_level_service.py
+      - tests/test_cn_index_daily.py
       - .github/workflows/premarket-ci.yml
   workflow_dispatch:
 
@@ -41,4 +43,4 @@ jobs:
 
       - name: Run premarket tests
         run: |
-          python -m pytest -p no:cacheprovider tests/test_premarket_window_service.py tests/test_trading_calendar.py tests/test_index_technical_level_service.py -q
+          python -m pytest -p no:cacheprovider tests/test_premarket_window_service.py tests/test_trading_calendar.py tests/test_index_technical_level_service.py tests/test_cn_index_daily.py -q
