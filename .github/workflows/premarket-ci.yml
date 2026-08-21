@@ -39,7 +39,7 @@ jobs:
 
       - name: Install minimal test dependencies
         run: |
-          python -m pip install pytest pandas "exchange-calendars>=4.13.0" "fastapi>=0.109.0" httpx
+          python -m pip install pytest pandas "exchange-calendars>=4.13.0" "fastapi>=0.109.0" httpx requests tenacity python-dotenv fake-useragent
 
       - name: Run premarket tests
         run: |
