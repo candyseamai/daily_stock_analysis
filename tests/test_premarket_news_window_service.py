@@ -117,6 +117,25 @@ def test_naive_iso_string_is_unverified_and_date_only_remains_unverified_with_po
     assert naive.time_unverified_items[0].time_parse_method == "naive_datetime"
     assert date_only.time_unverified_items[0].time_parse_method == "date_only"
     assert rfc_date_only.time_unverified_items[0].time_parse_method == "date_only"
+    assert rfc_date_only.time_unverified_items[0].published_at is None
+    assert rfc_date_only.verified_window_items == ()
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "Wed, 24 Mar 2026",
+        "Tue, 32 Mar 2026",
+        "Foo, 24 Mar 2026",
+        "Tue, 24 Xxx 2026",
+    ],
+)
+def test_invalid_rfc_date_only_values_remain_unparseable_with_naive_policy(raw):
+    result = _filter([_candidate(raw)], naive_timezone=SHANGHAI)
+
+    assert result.verified_window_items == ()
+    assert result.time_unverified_items[0].published_at is None
+    assert result.time_unverified_items[0].time_parse_method == "unparseable"
 
 
 @pytest.mark.parametrize(

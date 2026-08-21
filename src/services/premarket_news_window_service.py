@@ -36,6 +36,36 @@ _REPOST_SUFFIXES = (
     "(转载)",
     "【转载】",
 )
+_RFC_DATE_ONLY_PATTERN = re.compile(
+    r"^(?P<weekday>Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s+"
+    r"(?P<day>\d{1,2})\s+"
+    r"(?P<month>Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+"
+    r"(?P<year>\d{4})$",
+    flags=re.IGNORECASE,
+)
+_RFC_WEEKDAYS = {
+    "mon": 0,
+    "tue": 1,
+    "wed": 2,
+    "thu": 3,
+    "fri": 4,
+    "sat": 5,
+    "sun": 6,
+}
+_RFC_MONTHS = {
+    "jan": 1,
+    "feb": 2,
+    "mar": 3,
+    "apr": 4,
+    "may": 5,
+    "jun": 6,
+    "jul": 7,
+    "aug": 8,
+    "sep": 9,
+    "oct": 10,
+    "nov": 11,
+    "dec": 12,
+}
 
 
 @dataclass(frozen=True)
@@ -257,6 +287,21 @@ def _parse_published_at(
         try:
             date.fromisoformat(text)
         except ValueError:
+            return None, "unparseable"
+        return None, "date_only"
+
+    rfc_date_only = _RFC_DATE_ONLY_PATTERN.fullmatch(text)
+    if rfc_date_only is not None:
+        try:
+            parsed_date = date(
+                int(rfc_date_only.group("year")),
+                _RFC_MONTHS[rfc_date_only.group("month").lower()],
+                int(rfc_date_only.group("day")),
+            )
+        except (KeyError, ValueError):
+            return None, "unparseable"
+        expected_weekday = _RFC_WEEKDAYS[rfc_date_only.group("weekday").lower()]
+        if parsed_date.weekday() != expected_weekday:
             return None, "unparseable"
         return None, "date_only"
 
