@@ -19,7 +19,7 @@ import random
 import time
 from threading import BoundedSemaphore, RLock, Thread
 from abc import ABC, abstractmethod
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Callable, Optional, List, Tuple, Dict, Any
 
 import pandas as pd
@@ -31,6 +31,10 @@ from src.services.run_diagnostics import record_provider_run, record_provider_ru
 from .fundamental_adapter import AkshareFundamentalAdapter
 from .yfinance_fundamental_adapter import YfinanceFundamentalAdapter
 from .realtime_types import CircuitBreaker
+from .cn_index_daily import (
+    get_cn_index_identity,
+    normalize_cn_index_daily_data,
+)
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -327,6 +331,26 @@ class DataSourceUnavailableError(DataFetchError):
     pass
 
 
+class IndexDailyProviderError(DataFetchError):
+    """Sanitized, structured failure from an index-daily provider."""
+
+    ALLOWED_CATEGORIES = frozenset({
+        "dependency_unavailable",
+        "download_error",
+        "empty",
+        "ticker_mismatch",
+        "invalid_schema",
+        "duplicate_columns",
+    })
+
+    def __init__(self, category: str):
+        safe_category = (
+            category if category in self.ALLOWED_CATEGORIES else "invalid_schema"
+        )
+        self.category = safe_category
+        super().__init__(safe_category)
+
+
 class BaseFetcher(ABC):
     """
     数据源抽象基类
@@ -386,6 +410,21 @@ class BaseFetcher(ABC):
                 - change_pct: 涨跌幅(%)
                 - volume: 成交量
                 - amount: 成交额
+        """
+        return None
+
+    def get_index_daily_data(
+        self,
+        index_code: str,
+        expected_session: date,
+        days: int = 120,
+    ) -> Optional[pd.DataFrame]:
+        """Return provider-mapped index bars, or ``None`` when unsupported.
+
+        This optional, non-abstract capability keeps existing fetcher subclasses
+        compatible. Implementations must preserve the canonical ``sh``/``sz``
+        index code and must not route through the ordinary stock daily method.
+        ``days`` is the target minimum number of complete daily bars.
         """
         return None
 
@@ -628,6 +667,11 @@ class DataFetcherManager:
         "FinnhubFetcher": {"us"},
         "AlphaVantageFetcher": {"us"},
     }
+    _INDEX_DAILY_SOURCE_ORDER = (
+        "YfinanceFetcher",
+        "TushareFetcher",
+        "AkshareFetcher",
+    )
     _daily_source_health = CircuitBreaker(failure_threshold=3, cooldown_seconds=300.0)
     _CONCEPT_RANKINGS_CACHE_TTL_SECONDS = 300.0
     _CONCEPT_RANKINGS_EMPTY_CACHE_TTL_SECONDS = 30.0
@@ -1242,6 +1286,97 @@ class DataFetcherManager:
             self._fetchers.append(fetcher)
             self._fetchers.sort(key=lambda f: f.priority)
             self._refresh_fetcher_indexes_locked()
+
+    def get_index_daily_data(
+        self,
+        index_code: str,
+        expected_session: date,
+        days: int = 120,
+    ) -> Tuple[pd.DataFrame, str]:
+        """Return exactly the latest ``days`` complete bars from a fresh provider.
+
+        ``days`` is a target minimum bar count. Providers with fewer valid bars
+        after normalization and the expected-session cutoff are rejected so the
+        next fixed-order provider can be attempted.
+        """
+        if type(expected_session) is not date:
+            raise ValueError("expected_session must be a pure Python date, not datetime")
+        if type(days) is not int or days <= 0:
+            raise ValueError("days must be a positive integer")
+
+        identity = get_cn_index_identity(index_code)
+        fetchers_by_name = {
+            fetcher.name: fetcher for fetcher in self._get_fetchers_snapshot()
+        }
+        errors: List[str] = []
+
+        for provider_name in self._INDEX_DAILY_SOURCE_ORDER:
+            fetcher = fetchers_by_name.get(provider_name)
+            if fetcher is None:
+                errors.append(f"{provider_name}: unavailable")
+                continue
+            if not self._is_fetcher_available(fetcher, capability="index_daily_data"):
+                errors.append(f"{provider_name}: unavailable")
+                continue
+
+            try:
+                provider_frame = self._call_fetcher_method(
+                    fetcher,
+                    "get_index_daily_data",
+                    index_code=index_code,
+                    expected_session=expected_session,
+                    days=days,
+                )
+            except IndexDailyProviderError as exc:
+                errors.append(f"{provider_name}: {exc.category}")
+                continue
+            except Exception as exc:
+                errors.append(f"{provider_name}: exception({type(exc).__name__})")
+                continue
+
+            if provider_frame is None:
+                errors.append(f"{provider_name}: unsupported_or_no_data")
+                continue
+            if not isinstance(provider_frame, pd.DataFrame):
+                errors.append(f"{provider_name}: invalid_result_type")
+                continue
+            if provider_frame.empty:
+                errors.append(f"{provider_name}: empty")
+                continue
+
+            try:
+                normalized = normalize_cn_index_daily_data(
+                    provider_frame,
+                    index_code=identity.code,
+                    index_name=identity.name,
+                    provider=provider_name,
+                    expected_session=expected_session,
+                )
+            except Exception:
+                errors.append(f"{provider_name}: invalid_schema")
+                continue
+
+            latest_session = pd.Timestamp(normalized.iloc[-1]["date"]).date()
+            if latest_session < expected_session:
+                errors.append(
+                    f"{provider_name}: stale(latest={latest_session.isoformat()})"
+                )
+                continue
+            if len(normalized) < days:
+                errors.append(
+                    f"{provider_name}: insufficient_bars(actual={len(normalized)},required={days})"
+                )
+                continue
+
+            normalized_attrs = dict(normalized.attrs)
+            normalized = normalized.tail(days).reset_index(drop=True).copy()
+            normalized.attrs.update(normalized_attrs)
+            return normalized, provider_name
+
+        summary = "; ".join(errors) if errors else "no configured providers"
+        raise DataFetchError(
+            f"A-share index daily data unavailable for {identity.code}: {summary}"
+        )
     
     def get_daily_data(
         self, 

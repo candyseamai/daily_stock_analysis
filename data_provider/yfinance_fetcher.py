@@ -16,7 +16,7 @@ YfinanceFetcher - 兜底数据源 (Priority 4)
 
 import csv
 import logging
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from io import StringIO
 from typing import Optional, List, Dict, Any
 from urllib.error import HTTPError, URLError
@@ -31,10 +31,17 @@ from tenacity import (
     before_sleep_log,
 )
 
-from .base import BaseFetcher, DataFetchError, STANDARD_COLUMNS, is_bse_code
+from .base import (
+    BaseFetcher,
+    DataFetchError,
+    IndexDailyProviderError,
+    STANDARD_COLUMNS,
+    is_bse_code,
+)
 from .realtime_types import UnifiedRealtimeQuote, RealtimeSource
 from .us_index_mapping import get_us_index_yf_symbol, is_us_stock_code
 from .yfinance_fundamental_adapter import _safe_float
+from .cn_index_daily import get_cn_index_identity, get_cn_index_provider_symbol
 from src.services.market_symbol_utils import get_suffix_market, is_suffix_market_symbol
 
 # 可选导入本地股票映射补丁，若缺失则使用空字典兜底
@@ -180,6 +187,118 @@ class YfinanceFetcher(BaseFetcher):
         else:
             logger.warning(f"无法确定股票 {code} 的市场，默认使用深市")
             return f"{code}.SZ"
+
+    def get_index_daily_data(
+        self,
+        index_code: str,
+        expected_session: date,
+        days: int = 120,
+    ) -> Optional[pd.DataFrame]:
+        """Fetch at least ``days`` mapped bars without entering the stock route."""
+        if type(expected_session) is not date:
+            raise ValueError("expected_session must be a pure Python date, not datetime")
+        if type(days) is not int or days <= 0:
+            raise ValueError("days must be a positive integer")
+
+        identity = get_cn_index_identity(index_code)
+        symbol = get_cn_index_provider_symbol(
+            identity.code,
+            self.name,
+            identity.name,
+        )
+        start_date = expected_session - timedelta(days=days * 2)
+        exclusive_end = expected_session + timedelta(days=1)
+
+        try:
+            import yfinance as yf
+        except (ImportError, ModuleNotFoundError) as exc:
+            raise IndexDailyProviderError("dependency_unavailable") from exc
+
+        try:
+            downloaded = yf.download(
+                tickers=symbol,
+                start=start_date.isoformat(),
+                end=exclusive_end.isoformat(),
+                progress=False,
+                auto_adjust=True,
+                multi_level_index=True,
+            )
+        except Exception as exc:
+            raise IndexDailyProviderError("download_error") from exc
+
+        if not isinstance(downloaded, pd.DataFrame) or downloaded.empty:
+            raise IndexDailyProviderError("empty")
+        return self._normalize_index_download(downloaded, symbol)
+
+    @staticmethod
+    def _normalize_index_download(
+        downloaded: pd.DataFrame,
+        expected_symbol: str,
+    ) -> pd.DataFrame:
+        """Convert one Yahoo download to preliminary canonical daily columns."""
+        frame = downloaded.copy(deep=True)
+        required_prices = {"open", "high", "low", "close"}
+
+        if isinstance(frame.columns, pd.MultiIndex):
+            price_levels = []
+            for level_number in range(frame.columns.nlevels):
+                labels = {
+                    str(value).strip().lower()
+                    for value in frame.columns.get_level_values(level_number)
+                }
+                if required_prices.issubset(labels):
+                    price_levels.append(level_number)
+            if len(price_levels) != 1:
+                raise IndexDailyProviderError("invalid_schema")
+
+            price_level = price_levels[0]
+            ticker_levels = []
+            for level_number in range(frame.columns.nlevels):
+                if level_number == price_level:
+                    continue
+                level_values = {
+                    str(value).strip()
+                    for value in frame.columns.get_level_values(level_number)
+                }
+                if expected_symbol in level_values:
+                    ticker_levels.append((level_number, level_values))
+            if len(ticker_levels) != 1:
+                raise IndexDailyProviderError("ticker_mismatch")
+            ticker_level, ticker_values = ticker_levels[0]
+            if ticker_values != {expected_symbol}:
+                raise IndexDailyProviderError("ticker_mismatch")
+
+            ticker_mask = [
+                str(value).strip() == expected_symbol
+                for value in frame.columns.get_level_values(ticker_level)
+            ]
+            frame = frame.loc[:, ticker_mask].copy()
+            frame.columns = frame.columns.get_level_values(price_level)
+            if frame.columns.duplicated().any():
+                raise IndexDailyProviderError("duplicate_columns")
+
+        frame = frame.reset_index()
+        renamed = {}
+        for column in frame.columns:
+            normalized_name = str(column).strip().lower()
+            if normalized_name in {"date", "datetime"}:
+                renamed[column] = "date"
+            elif normalized_name in {"open", "high", "low", "close", "volume"}:
+                renamed[column] = normalized_name
+        frame = frame.rename(columns=renamed)
+        if "date" not in frame.columns and len(frame.columns):
+            frame = frame.rename(columns={frame.columns[0]: "date"})
+        if not {"date", *required_prices}.issubset(frame.columns):
+            raise IndexDailyProviderError("invalid_schema")
+        if frame.columns.duplicated().any():
+            raise IndexDailyProviderError("duplicate_columns")
+
+        if "volume" not in frame.columns:
+            frame["volume"] = pd.NA
+        frame["amount"] = pd.NA
+        return frame.loc[
+            :, ["date", "open", "high", "low", "close", "volume", "amount"]
+        ].copy()
 
     @retry(
         stop=stop_after_attempt(3),
