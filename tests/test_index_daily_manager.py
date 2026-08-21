@@ -248,7 +248,12 @@ def test_manager_standardization_removes_future_bars():
         _FakeIndexFetcher("YfinanceFetcher", frame, calls)
     ).get_index_daily_data("sh000001", EXPECTED)
 
-    assert list(result["date"].dt.date) == [EXPECTED]
+    result_dates = list(result["date"].dt.date)
+    assert len(result_dates) == 120
+    assert result_dates[0] == date(2025, 10, 8)
+    assert result_dates[-1] == EXPECTED
+    assert all(item <= EXPECTED for item in result_dates)
+    assert date(2026, 3, 25) not in result_dates
     assert "future_bars_removed:1" in result.attrs["warnings"]
 
 
